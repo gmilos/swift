@@ -22,10 +22,12 @@
 #
 # ----------------------------------------------------------------------------
 
+from __future__ import print_function
+
+import argparse
 import sys
 import lldb
 import subprocess
-from __future__ import print_function
 
 DYN_LIBS = {}
 BINARY = None
@@ -75,9 +77,9 @@ def process_stack(stack):
             dynlib_baseaddr = framePC - symbol_offset
             if dynlib_path in memmap:
                 if memmap[dynlib_path] != dynlib_baseaddr:
-                    print "Mismatched base address for: {0:s}, " \
+                    print("Mismatched base address for: {0:s}, "
                           "had: {1:x}, now got {2:x}".format(
-                            dynlib_path, memmap[dynlib_path], dynlib_baseaddr)
+                            dynlib_path, memmap[dynlib_path], dynlib_baseaddr))
                     sys.exit(1)
             else:
                 memmap[dynlib_path] = dynlib_baseaddr
@@ -108,20 +110,25 @@ def process_stack(stack):
         else:
             line_fragment = ""
         if use_orig_line:
-            print frame["line"].rstrip()
+            print(frame["line"].rstrip())
         else:
-            print "{0:s}    {1:s} {2:s}".format(
-                frame_fragment, symbol_fragment, line_fragment)
+            print("{0:s}    {1:s} {2:s}".format(
+                frame_fragment, symbol_fragment, line_fragment))
         frame_idx = frame_idx + 1
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("usage: {0:s} binary logfile".format(sys.argv[0]))
-        sys.exit(1)
+    global BINARY
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""Symbolicates stack traces in Linux log files.""")
+    parser.add_argument("binary", help="Executable which produced the log file")
+    parser.add_argument(
+        "log", help="Log file containing the stack trace to symbolicate")
+    args = parser.parse_args()
 
-    BINARY = sys.argv[1]
-    logfile = sys.argv[2]
+    BINARY = args.binary
+    logfile = args.log
 
     lddoutput = subprocess.check_output(
         ['ldd', BINARY], stderr=subprocess.STDOUT)
@@ -140,7 +147,7 @@ def main():
                 stackidx = 0
                 process_stack(stack)
                 stack = []
-                print line.rstrip()
+                print(line.rstrip())
             if line.startswith("Current stack trace:"):
                 instack = True
     process_stack(stack)
