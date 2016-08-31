@@ -21,6 +21,7 @@
 #include "swift/AST/Attr.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/ParameterList.h"
@@ -923,10 +924,6 @@ ASTPrinter &ASTPrinter::operator<<(DeclName name) {
   printTextImpl(os.str());
   return *this;
 }
-
-// FIXME: We need to undef 'defer' when including Tokens.def. It is restored
-// below.
-#undef defer
 
 ASTPrinter &operator<<(ASTPrinter &printer, tok keyword) {
   StringRef name;
@@ -3791,40 +3788,45 @@ public:
       return;
 
     if (info.isAutoClosure() && !Options.excludeAttrKind(TAK_autoclosure)) {
-      Printer.printAttrName("@autoclosure");
-      Printer << " ";
+      Printer.printSimpleAttr("@autoclosure") << " ";
     }
     if (inParameterPrinting && !info.isNoEscape() &&
         !Options.excludeAttrKind(TAK_escaping)) {
-      Printer.printAttrName("@escaping");
-      Printer << " ";
+      Printer.printSimpleAttr("@escaping") << " ";
     }
 
     if (Options.PrintFunctionRepresentationAttrs &&
-        !Options.excludeAttrKind(TAK_convention)) {
+        !Options.excludeAttrKind(TAK_convention) &&
+        info.getSILRepresentation() != SILFunctionType::Representation::Thick) {
+      Printer.callPrintStructurePre(PrintStructureKind::BuiltinAttribute);
+      Printer.printAttrName("@convention");
+      Printer << "(";
       // TODO: coalesce into a single convention attribute.
       switch (info.getSILRepresentation()) {
       case SILFunctionType::Representation::Thick:
-        break;
+        llvm_unreachable("thick is not printed");
       case SILFunctionType::Representation::Thin:
-        Printer << "@convention(thin) ";
+        Printer << "thin";
         break;
       case SILFunctionType::Representation::Block:
-        Printer << "@convention(block) ";
+        Printer << "block";
         break;
       case SILFunctionType::Representation::CFunctionPointer:
-        Printer << "@convention(c) ";
+        Printer << "c";
         break;
       case SILFunctionType::Representation::Method:
-        Printer << "@convention(method) ";
+        Printer << "method";
         break;
       case SILFunctionType::Representation::ObjCMethod:
-        Printer << "@convention(objc_method) ";
+        Printer << "objc_method";
         break;
       case SILFunctionType::Representation::WitnessMethod:
-        Printer << "@convention(witness_method) ";
+        Printer << "witness_method";
         break;
       }
+      Printer << ")";
+      Printer.printStructurePost(PrintStructureKind::BuiltinAttribute);
+      Printer << " ";
     }
   }
 
@@ -3832,34 +3834,43 @@ public:
     if (Options.SkipAttributes)
       return;
 
-    if (Options.PrintFunctionRepresentationAttrs) {
+    if (Options.PrintFunctionRepresentationAttrs &&
+        !Options.excludeAttrKind(TAK_convention) &&
+        info.getRepresentation() != SILFunctionType::Representation::Thick) {
+      Printer.callPrintStructurePre(PrintStructureKind::BuiltinAttribute);
+      Printer.printAttrName("@convention");
+      Printer << "(";
       // TODO: coalesce into a single convention attribute.
       switch (info.getRepresentation()) {
       case SILFunctionType::Representation::Thick:
-        break;
+        llvm_unreachable("thick is not printed");
       case SILFunctionType::Representation::Thin:
-        Printer << "@convention(thin) ";
+        Printer << "thin";
         break;
       case SILFunctionType::Representation::Block:
-        Printer << "@convention(block) ";
+        Printer << "block";
         break;
       case SILFunctionType::Representation::CFunctionPointer:
-        Printer << "@convention(c) ";
+        Printer << "c";
         break;
       case SILFunctionType::Representation::Method:
-        Printer << "@convention(method) ";
+        Printer << "method";
         break;
       case SILFunctionType::Representation::ObjCMethod:
-        Printer << "@convention(objc_method) ";
+        Printer << "objc_method";
         break;
       case SILFunctionType::Representation::WitnessMethod:
-        Printer << "@convention(witness_method) ";
+        Printer << "witness_method";
         break;
       }
+      Printer << ")";
+      Printer.printStructurePost(PrintStructureKind::BuiltinAttribute);
+      Printer << " ";
     }
 
-    if (info.isPseudogeneric())
-      Printer << "@pseudogeneric ";
+    if (info.isPseudogeneric()) {
+      Printer.printSimpleAttr("@pseudogeneric") << " ";
+    }
   }
 
   void visitFunctionType(FunctionType *T) {
@@ -4264,25 +4275,14 @@ public:
     }
   }
 
-  GenericParamList *getGenericParamListAtDepth(unsigned depth) {
-    assert(Options.ContextGenericParams);
-    if (!UnwrappedGenericParams) {
-      std::vector<GenericParamList *> paramLists;
-      for (auto *params = Options.ContextGenericParams;
-           params;
-           params = params->getOuterParameters()) {
-        paramLists.push_back(params);
-      }
-      UnwrappedGenericParams = std::move(paramLists);
-    }
-    return UnwrappedGenericParams->rbegin()[depth];
-  }
-
   void visitGenericTypeParamType(GenericTypeParamType *T) {
     // Substitute a context archetype if we have context generic params.
-    if (Options.ContextGenericParams) {
-      return visit(getGenericParamListAtDepth(T->getDepth())
-                     ->getParams()[T->getIndex()]->getArchetype());
+    if (Options.GenericEnv) {
+      auto *paramTy = T->getCanonicalType().getPointer();
+      auto &map = Options.GenericEnv->getInterfaceToArchetypeMap();
+      auto found = map.find(paramTy);
+      if (found != map.end())
+        return visit(found->second);
     }
 
     auto Name = T->getName();
@@ -4473,18 +4473,11 @@ void TypeBase::print(ASTPrinter &Printer, const PrintOptions &PO) const {
 void ProtocolConformance::printName(llvm::raw_ostream &os,
                                     const PrintOptions &PO) const {
   if (getKind() == ProtocolConformanceKind::Normal) {
-    if (PO.PrintForSIL) {
-      if (auto genericSig = getGenericSignature()) {
-        StreamPrinter sPrinter(os);
-        TypePrinter typePrinter(sPrinter, PO);
-        typePrinter.printGenericSignature(genericSig->getGenericParams(),
-                                          genericSig->getRequirements());
-        os << ' ';
-      }
-    } else if (auto gp = getGenericParams()) {
-      StreamPrinter SPrinter(os);
-      PrintAST Printer(SPrinter, PO);
-      Printer.printGenericParams(gp);
+    if (auto genericSig = getGenericSignature()) {
+      StreamPrinter sPrinter(os);
+      TypePrinter typePrinter(sPrinter, PO);
+      typePrinter.printGenericSignature(genericSig->getGenericParams(),
+                                        genericSig->getRequirements());
       os << ' ';
     }
   }

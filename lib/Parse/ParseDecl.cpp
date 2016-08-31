@@ -333,9 +333,8 @@ bool Parser::parseNewDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
       if (!Tok.is(tok::equal))
         return false;
 
-      bool wantSpace = (Tok.getRange().getEnd() == peekToken().getLoc());
       diagnose(Tok.getLoc(), diag::replace_equal_with_colon_for_value)
-        .fixItReplace(Tok.getLoc(), wantSpace ? ": " : ":");
+        .fixItReplace(Tok.getLoc(), ": ");
     }
     return true;
   };
@@ -1410,11 +1409,8 @@ bool Parser::parseTypeAttribute(TypeAttributes &Attributes, bool justChecking) {
       if (Attributes.has(TAK_noescape)) {
         diagnose(Loc, diag::attr_noescape_conflicts_escaping_autoclosure);
       } else {
-        StringRef replacement = " @escaping ";
-        if (autoclosureEscapingParenRange.End.getAdvancedLoc(1) != Tok.getLoc())
-          replacement = replacement.drop_back();
         diagnose(Loc, diag::attr_autoclosure_escaping_deprecated)
-            .fixItReplace(autoclosureEscapingParenRange, replacement);
+            .fixItReplace(autoclosureEscapingParenRange, " @escaping ");
       }
       Attributes.setAttr(TAK_escaping, Loc);
     } else if (Attributes.has(TAK_noescape)) {
@@ -1792,6 +1788,22 @@ void Parser::delayParseFromBeginningToHere(ParserPosition BeginParserPosition,
 /// \endverbatim
 ParserStatus Parser::parseDecl(ParseDeclOptions Flags,
                                llvm::function_ref<void(Decl*)> Handler) {
+  if (Tok.isAny(tok::pound_sourceLocation, tok::pound_line))
+    return parseLineDirective(Tok.is(tok::pound_line));
+
+  if (Tok.is(tok::pound_if)) {
+    auto IfConfigResult = parseDeclIfConfig(Flags);
+    if (auto ICD = IfConfigResult.getPtrOrNull()) {
+      // The IfConfigDecl is ahead of its members in source order.
+      Handler(ICD);
+      // Copy the active members into the entries list.
+      for (auto activeMember : ICD->getActiveMembers()) {
+        Handler(activeMember);
+      }
+    }
+    return IfConfigResult;
+  }
+
   Decl* LastDecl = nullptr;
   auto InternalHandler  = [&](Decl *D) {
     LastDecl = D;
@@ -1942,6 +1954,13 @@ ParserStatus Parser::parseDecl(ParseDeclOptions Flags,
       // Otherwise this is not a context-sensitive keyword.
       SWIFT_FALLTHROUGH;
 
+    case tok::pound_if:
+    case tok::pound_sourceLocation:
+    case tok::pound_line:
+      // We see some attributes right before these pounds.
+      // TODO: Emit dedicated errors for them.
+      SWIFT_FALLTHROUGH;
+
     // Obvious nonsense.
     default:
       if (FoundCCTokenInAttr) {
@@ -1996,6 +2015,7 @@ ParserStatus Parser::parseDecl(ParseDeclOptions Flags,
     case tok::kw_typealias:
       DeclResult = parseDeclTypeAlias(Flags, Attributes);
       Status = DeclResult;
+      MayNeedOverrideCompletion = true;
       break;
     case tok::kw_associatedtype:
       DeclResult = parseDeclAssociatedType(Flags, Attributes);
@@ -2034,26 +2054,6 @@ ParserStatus Parser::parseDecl(ParseDeclOptions Flags,
     case tok::kw_protocol:
       DeclResult = parseDeclProtocol(Flags, Attributes);
       Status = DeclResult;
-      break;
-    case tok::pound_if: {
-      auto IfConfigResult = parseDeclIfConfig(Flags);
-      Status = IfConfigResult;
-
-      if (auto ICD = IfConfigResult.getPtrOrNull()) {
-        // The IfConfigDecl is ahead of its members in source order.
-        InternalHandler(ICD);
-        // Copy the active members into the entries list.
-        for (auto activeMember : ICD->getActiveMembers()) {
-          InternalHandler(activeMember);
-        }
-      }
-      break;
-    }
-    case tok::pound_sourceLocation:
-      Status = parseLineDirective(false);
-      break;
-    case tok::pound_line:
-      Status = parseLineDirective(true);
       break;
 
     case tok::kw_func:
@@ -2095,6 +2095,7 @@ ParserStatus Parser::parseDecl(ParseDeclOptions Flags,
         case tok::kw_func:
         case tok::kw_subscript:
         case tok::kw_var:
+        case tok::kw_typealias:
           Keywords.push_back(OrigTok.getText());
           break;
         default:
@@ -2834,7 +2835,7 @@ parseDeclTypeAlias(Parser::ParseDeclOptions Flags, DeclAttributes &Attributes) {
       // It is a common mistake to write "typealias A : Int" instead of = Int.
       // Recognize this and produce a fixit.
       diagnose(Tok, diag::expected_equal_in_typealias)
-          .fixItReplace(Tok.getLoc(), "=");
+          .fixItReplace(Tok.getLoc(), " = ");
       consumeToken(tok::colon);
     } else {
       consumeToken(tok::equal);
