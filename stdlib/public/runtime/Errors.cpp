@@ -131,6 +131,10 @@ static void dumpStackTraceEntry(unsigned index, void *framePC) {
   // We do not use %p here for our pointers since the format is implementation
   // defined. This makes it logically impossible to check the output. Forcing
   // hexadecimal solves this issue.
+  // If the symbol is not available, we print out <unavailable> + offset
+  // from the base address of where the image containing framePC is mapped.
+  // This gives enough info to reconstruct identical debugging target after
+  // this process terminates.
   if (foundSymbol) {
     static const char *backtraceEntryFormat = "%-4u %-34s 0x%0.16lx %s + %td\n";
     fprintf(stderr, backtraceEntryFormat, index, libraryName.data(), symbolAddr,
